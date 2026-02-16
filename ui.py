@@ -14,6 +14,7 @@ from backend import (
     load_results_map_from_cache,
     process_scan_batch,
     reconcile_cache_with_library,
+    refresh_single_show,
     save_config,
     set_episode_ignore,
     set_show_missing_ignore,
@@ -451,6 +452,17 @@ def render_result_item(item, config, show_poster=True):
     cache_entry = cache.get(item["cache_key"], {})
     ignored = cache_entry.get("ignored_missing", [])
     ignore_all = bool(cache_entry.get("ignore_all_missing"))
+    ensure_scan_state()
+    scan_running = st.session_state["scan_state"]["running"]
+
+    def render_refresh_button():
+        if st.button("Refresh", key=f"refresh_{item['cache_key']}", disabled=scan_running):
+            ok, msg, _ = refresh_single_show(item["cache_key"], config, get_results_map())
+            if ok:
+                st.success(msg)
+                trigger_rerun()
+            else:
+                st.error(msg)
 
     if show_poster:
         poster_col, text_col = st.columns([1, 6])
@@ -461,6 +473,17 @@ def render_result_item(item, config, show_poster=True):
             st.markdown(f"### {item.get('title', 'Unknown')}")
             st.write(f"{item.get('status', 'Unknown')} | {len(item.get('missing', []))} missing episodes")
         st.markdown("---")
+    else:
+        status_col, action_col = st.columns([4, 1])
+        with status_col:
+            st.caption(f"{item.get('status', 'Unknown')} | {len(item.get('missing', []))} missing episodes")
+        with action_col:
+            render_refresh_button()
+
+    if show_poster:
+        _, refresh_col = st.columns([5, 1])
+        with refresh_col:
+            render_refresh_button()
 
     with st.expander("Show Settings", expanded=False):
         tmdb_default = cache_entry.get("manual_tmdb_id") or item.get("tmdb_id") or ""
