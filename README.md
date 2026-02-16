@@ -21,8 +21,9 @@ missing episodes and jump directly to Debrid Media Manager to grab what you need
 - Supports manual TMDB fixes per show
 - Supports ignore/unignore for noisy episodes or whole shows
 - Supports scan scope:
-  - entire library
-  - only watchlisted TV shows
+  - Entire library
+  - Only watchlisted TV shows
+  - Also, perform a quick scan for the specific show after adding the missing episode or episodes to avoid scanning the entire library.
 
 ## Tech Stack
 
