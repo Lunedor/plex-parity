@@ -4,6 +4,13 @@ Plex Parity is a Streamlit app for tracking missing TV episodes in your Plex lib
 
 ![Plex Parity Dashboard Interface](sample.jpg)
 
+## Why Plex Parity?
+
+If you're like me, you find -arr apps overly complex for simple library tracking, 
+and you want manual control over release selection (specific subtitled versions, 
+quality preferences, etc.). Plex Parity gives you a simple dashboard to spot 
+missing episodes and jump directly to Debrid Media Manager to grab what you need.
+
 ## Core Features
 
 - Scans TV shows and detects missing aired episodes
