@@ -140,4 +140,4 @@ Then open the local URL shown in terminal (usually `http://localhost:8501`).
 
 ## License
 
-No license file is currently included. Add one before wider distribution if needed.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
