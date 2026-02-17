@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -77,6 +79,7 @@ def load_results_map_from_cache(cache=None):
             "imdb_id": entry.get("imdb_id"),
             "missing": entry.get("missing", []) or [],
             "next_air": entry.get("next_air"),
+            "upcoming_all": entry.get("upcoming_all", []) or [],
             "tmdb_source": entry.get("tmdb_source", "cache"),
             "poster_url": entry.get("poster_url"),
         }
@@ -330,6 +333,138 @@ def apply_ignored_missing(entry, missing_codes):
     return [code for code in missing_codes if code not in ignored]
 
 
+def parse_iso_date(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def normalize_upcoming_list(entry):
+    raw_items = []
+    upcoming_all = entry.get("upcoming_all")
+    if isinstance(upcoming_all, list):
+        raw_items.extend(upcoming_all)
+    next_air = entry.get("next_air")
+    if isinstance(next_air, dict):
+        raw_items.append(next_air)
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        date_str = item.get("date")
+        code = item.get("code")
+        if not isinstance(code, str):
+            continue
+        if parse_iso_date(date_str) is None:
+            continue
+        token = (date_str, code)
+        if token in seen:
+            continue
+        seen.add(token)
+        normalized.append({"date": date_str, "code": code})
+
+    normalized.sort(key=lambda x: (x["date"], x["code"]))
+    return normalized
+
+
+def advance_cached_missing_by_date(cache, today=None):
+    check_date = today or datetime.now().date()
+    changed = False
+
+    for _, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+
+        upcoming_items = normalize_upcoming_list(entry)
+        due_codes = []
+        future_items = []
+
+        for item in upcoming_items:
+            air_date = parse_iso_date(item["date"])
+            if air_date is None:
+                continue
+            if air_date <= check_date:
+                due_codes.append(item["code"])
+            else:
+                future_items.append(item)
+
+        existing_missing_raw = entry.get("missing_raw", entry.get("missing", [])) or []
+        if not isinstance(existing_missing_raw, list):
+            existing_missing_raw = []
+        existing_missing_raw = [code for code in existing_missing_raw if isinstance(code, str)]
+
+        merged_missing_raw = sorted(set(existing_missing_raw + due_codes))
+        visible_missing = apply_ignored_missing(entry, merged_missing_raw)
+        next_air = future_items[0] if future_items else None
+
+        if entry.get("missing_raw") != merged_missing_raw:
+            entry["missing_raw"] = merged_missing_raw
+            changed = True
+        if entry.get("missing") != visible_missing:
+            entry["missing"] = visible_missing
+            changed = True
+        if entry.get("upcoming_all") != future_items:
+            entry["upcoming_all"] = future_items
+            changed = True
+        if entry.get("next_air") != next_air:
+            entry["next_air"] = next_air
+            changed = True
+
+    return changed
+
+
+def build_scan_key_list(shows, cache, scan_mode="full"):
+    mode = "incremental" if scan_mode == "incremental" else "full"
+    if mode == "full":
+        return [str(show.ratingKey) for show in shows]
+
+    keys = []
+    for show in shows:
+        key = str(show.ratingKey)
+        entry = cache.get(key)
+        if not isinstance(entry, dict):
+            keys.append(key)
+            continue
+        if entry.get("force_rescan"):
+            keys.append(key)
+            continue
+        if not isinstance(entry.get("tmdb_id"), int):
+            keys.append(key)
+            continue
+        if entry.get("missing"):
+            keys.append(key)
+            continue
+        if entry.get("status") not in ENDED_STATUSES:
+            keys.append(key)
+            continue
+
+    return keys
+
+
+def build_cached_refresh_key_list(cache):
+    keys = []
+    for key, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("title"):
+            continue
+        if entry.get("status") not in ENDED_STATUSES:
+            keys.append(str(key))
+            continue
+        if entry.get("missing"):
+            keys.append(str(key))
+            continue
+        if not isinstance(entry.get("tmdb_id"), int):
+            keys.append(str(key))
+            continue
+    return sorted(set(keys))
+
+
 def evaluate_show(show, cache_entry, config, today):
     show_title = show.title
     show_year = show.year
@@ -381,7 +516,7 @@ def evaluate_show(show, cache_entry, config, today):
     local_episodes = {s.index: [e.index for e in s.episodes()] for s in show.seasons()}
 
     raw_missing = []
-    upcoming = None
+    upcoming_items = []
 
     for season in details.get("seasons", []):
         s_num = season.get("season_number")
@@ -412,12 +547,11 @@ def evaluate_show(show, cache_entry, config, today):
                 if e_num not in local_episodes.get(s_num, []):
                     raw_missing.append(f"S{s_num:02d}E{e_num:02d}")
             else:
-                if not upcoming or air_date < datetime.strptime(
-                    upcoming["date"], "%Y-%m-%d"
-                ).date():
-                    upcoming = {"date": str(air_date), "code": f"S{s_num:02d}E{e_num:02d}"}
+                upcoming_items.append({"date": str(air_date), "code": f"S{s_num:02d}E{e_num:02d}"})
 
     raw_missing = sorted(set(raw_missing))
+    upcoming = normalize_upcoming_list({"upcoming_all": upcoming_items})
+    next_air = upcoming[0] if upcoming else None
     visible_missing = apply_ignored_missing(cache_entry, raw_missing)
 
     cache_entry["tmdb_id"] = tmdb_id
@@ -427,7 +561,8 @@ def evaluate_show(show, cache_entry, config, today):
     cache_entry["status"] = status
     cache_entry["missing_raw"] = raw_missing
     cache_entry["missing"] = visible_missing
-    cache_entry["next_air"] = upcoming
+    cache_entry["upcoming_all"] = upcoming
+    cache_entry["next_air"] = next_air
     cache_entry["force_rescan"] = False
     cache_entry["last_scan_at"] = datetime.now().isoformat(timespec="seconds")
 
@@ -440,7 +575,8 @@ def evaluate_show(show, cache_entry, config, today):
             "tmdb_id": tmdb_id,
             "imdb_id": imdb_id,
             "missing": visible_missing,
-            "next_air": upcoming,
+            "next_air": next_air,
+            "upcoming_all": upcoming,
             "tmdb_source": source,
             "poster_url": poster_url,
         },
@@ -475,6 +611,7 @@ def reconcile_cache_with_library(cache, shows):
                 entry.pop("tmdb_source", None)
                 entry.pop("status", None)
                 entry.pop("next_air", None)
+                entry.pop("upcoming_all", None)
                 entry.pop("missing_raw", None)
                 entry["missing"] = []
             entry["force_rescan"] = True
@@ -598,6 +735,7 @@ def set_tmdb_override(cache_key, tmdb_value, config, results_map=None):
         entry.pop("tmdb_source", None)
         entry.pop("status", None)
         entry.pop("next_air", None)
+        entry.pop("upcoming_all", None)
         entry.pop("poster_url", None)
         entry.pop("missing_raw", None)
         entry["missing"] = []
@@ -623,6 +761,7 @@ def set_tmdb_override(cache_key, tmdb_value, config, results_map=None):
     entry.pop("imdb_id", None)
     entry.pop("status", None)
     entry.pop("next_air", None)
+    entry.pop("upcoming_all", None)
     entry.pop("poster_url", None)
     entry.pop("missing_raw", None)
     entry["missing"] = []
@@ -685,6 +824,7 @@ def apply_overrides_to_results(results):
         updated["tmdb_source"] = entry.get("tmdb_source", updated.get("tmdb_source"))
         updated["status"] = entry.get("status", updated.get("status"))
         updated["next_air"] = entry.get("next_air", updated.get("next_air"))
+        updated["upcoming_all"] = entry.get("upcoming_all", updated.get("upcoming_all", []))
         updated["poster_url"] = entry.get("poster_url", updated.get("poster_url"))
         output.append(updated)
     return output
@@ -695,3 +835,123 @@ def extract_season_number(code):
     if not match:
         return None
     return int(match.group(1))
+
+
+def run_git_command(args, timeout=20):
+    if not shutil.which("git"):
+        return False, "", "Git is not installed or not available in PATH."
+
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        return False, "", str(exc)
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        return False, stdout, stderr or "Git command failed."
+    return True, stdout, stderr
+
+
+def check_app_updates(fetch_remote=True):
+    ok, _, err = run_git_command(["rev-parse", "--is-inside-work-tree"])
+    if not ok:
+        return {
+            "ok": False,
+            "message": "Update check is available only when running from a git repository.",
+            "error": err,
+        }
+
+    ok, branch, err = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+    if not ok:
+        return {"ok": False, "message": "Failed to detect current branch.", "error": err}
+    if branch == "HEAD":
+        return {
+            "ok": False,
+            "message": "Detached HEAD detected. Switch to a branch to check updates.",
+            "error": "",
+        }
+
+    ok, local_sha, err = run_git_command(["rev-parse", "HEAD"])
+    if not ok:
+        return {"ok": False, "message": "Failed to read local commit.", "error": err}
+
+    ok, remote_url, err = run_git_command(["remote", "get-url", "origin"])
+    if not ok:
+        return {
+            "ok": False,
+            "message": "Git remote 'origin' is missing. Cannot check remote updates.",
+            "error": err,
+        }
+
+    if fetch_remote:
+        ok, _, err = run_git_command(["fetch", "origin", branch, "--quiet"], timeout=45)
+        if not ok:
+            return {"ok": False, "message": "Failed to fetch remote updates.", "error": err}
+
+    ok, remote_sha, err = run_git_command(["rev-parse", f"origin/{branch}"])
+    if not ok:
+        return {
+            "ok": False,
+            "message": f"Remote branch origin/{branch} not found.",
+            "error": err,
+        }
+
+    ok, behind_raw, err = run_git_command(["rev-list", "--count", f"HEAD..origin/{branch}"])
+    if not ok:
+        return {"ok": False, "message": "Failed to calculate update distance.", "error": err}
+    ok, ahead_raw, err = run_git_command(["rev-list", "--count", f"origin/{branch}..HEAD"])
+    if not ok:
+        return {"ok": False, "message": "Failed to calculate update distance.", "error": err}
+
+    behind = int(behind_raw or "0")
+    ahead = int(ahead_raw or "0")
+    up_to_date = behind == 0
+
+    if up_to_date and ahead == 0:
+        message = "App is up to date."
+    elif behind > 0 and ahead == 0:
+        message = f"Update available: {behind} commit(s) behind origin/{branch}."
+    elif behind == 0 and ahead > 0:
+        message = f"Local branch is {ahead} commit(s) ahead of origin/{branch}."
+    else:
+        message = f"Branch has diverged ({ahead} ahead, {behind} behind)."
+
+    return {
+        "ok": True,
+        "message": message,
+        "branch": branch,
+        "remote_url": remote_url,
+        "local_sha": local_sha,
+        "remote_sha": remote_sha,
+        "behind": behind,
+        "ahead": ahead,
+    }
+
+
+def update_app_from_remote():
+    status = check_app_updates(fetch_remote=True)
+    if not status.get("ok"):
+        return False, status.get("message", "Update check failed."), status
+
+    branch = status.get("branch")
+    behind = int(status.get("behind", 0) or 0)
+    ahead = int(status.get("ahead", 0) or 0)
+
+    if behind == 0:
+        return True, "Already up to date.", status
+    if ahead > 0:
+        return False, "Local branch is ahead/diverged. Update skipped to avoid conflicts.", status
+
+    ok, _, err = run_git_command(["pull", "--ff-only", "origin", branch], timeout=60)
+    if not ok:
+        return False, "Update failed. Fast-forward pull was not possible.", {"error": err, **status}
+
+    refreshed = check_app_updates(fetch_remote=False)
+    return True, "Update completed. Restart the app to ensure all changes are loaded.", refreshed
