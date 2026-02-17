@@ -750,7 +750,7 @@ def run_app():
     st.set_page_config(page_title="Plex Parity", layout="wide")
     apply_global_style()
     st.title("Plex Parity")
-    st.caption("Track library freshness, fix mappings quickly, and prioritize what airs next.")
+    st.caption("Track your plex library for tv series, fix mappings quickly, and prioritize what airs next.")
 
     if "app_config" not in st.session_state:
         st.session_state["app_config"] = load_config()
