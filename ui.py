@@ -4,7 +4,11 @@ import streamlit as st
 
 from backend import (
     ENDED_STATUSES,
+    advance_cached_missing_by_date,
     apply_overrides_to_results,
+    build_cached_refresh_key_list,
+    build_scan_key_list,
+    check_app_updates,
     connect_library,
     extract_season_number,
     filter_shows_for_scan,
@@ -15,17 +19,22 @@ from backend import (
     process_scan_batch,
     reconcile_cache_with_library,
     refresh_single_show,
+    save_cache,
     save_config,
     set_episode_ignore,
     set_show_missing_ignore,
     set_tmdb_override,
+    update_app_from_remote,
     validate_config,
 )
 
 
 def ensure_scan_state():
     if "scan_state" not in st.session_state:
-        cached_results = load_results_map_from_cache()
+        cache = load_cache()
+        if advance_cached_missing_by_date(cache):
+            save_cache(cache)
+        cached_results = load_results_map_from_cache(cache)
         st.session_state["scan_state"] = {
             "running": False,
             "paused": False,
@@ -36,7 +45,7 @@ def ensure_scan_state():
             "results_map": cached_results,
             "unmatched": [],
             "last_status": "Idle",
-            "cache": load_cache(),
+            "cache": cache,
             "started_at": None,
             "error": None,
         }
@@ -49,37 +58,61 @@ def trigger_rerun():
         st.experimental_rerun()
 
 
-def start_scan(config):
+def start_scan(config, scan_mode="full"):
     missing = validate_config(config)
     if missing:
         st.error("Missing config values: " + ", ".join(missing))
         return
 
-    plex, section, err = connect_library(config)
-    if err:
-        st.error("Failed to connect to Plex: " + err)
-        return
-
-    shows = section.all()
-    scan_scope = config.get("scan_scope", "all_library")
-    shows, scope_note = filter_shows_for_scan(plex, shows, scan_scope)
-    if scope_note:
-        st.info(scope_note)
-    if not shows:
-        st.warning("No shows found for current scan scope.")
-        return
-
-    show_keys = [str(show.ratingKey) for show in shows]
     cache = load_cache()
+    if advance_cached_missing_by_date(cache):
+        save_cache(cache)
     previous_results = (
         st.session_state.get("scan_state", {}).get("results_map")
         or load_results_map_from_cache(cache)
     )
-    removed, changed = reconcile_cache_with_library(cache, shows)
+
+    removed = 0
+    changed = 0
+
+    if scan_mode == "refresh_cached":
+        show_keys = build_cached_refresh_key_list(cache)
+    else:
+        plex, section, err = connect_library(config)
+        if err:
+            st.error("Failed to connect to Plex: " + err)
+            return
+
+        shows = section.all()
+        scan_scope = config.get("scan_scope", "all_library")
+        shows, scope_note = filter_shows_for_scan(plex, shows, scan_scope)
+        if scope_note:
+            st.info(scope_note)
+        if not shows:
+            st.warning("No shows found for current scan scope.")
+            return
+
+        removed, changed = reconcile_cache_with_library(cache, shows)
+        show_keys = build_scan_key_list(shows, cache, scan_mode=scan_mode)
+
+    if not show_keys:
+        if scan_mode == "incremental":
+            st.info("Incremental scan found nothing new/changed to process.")
+        elif scan_mode == "refresh_cached":
+            st.info("Cached refresh found nothing active to process.")
+        else:
+            st.info("No shows available to scan.")
+        return
     new_state = init_scan_state(show_keys, cache)
+    if scan_mode == "full":
+        new_state["last_status"] = "Starting full scan..."
+    elif scan_mode == "incremental":
+        new_state["last_status"] = "Starting incremental scan..."
+    else:
+        new_state["last_status"] = "Refreshing cached ongoing data..."
     new_state["results_map"] = previous_results.copy()
     st.session_state["scan_state"] = new_state
-    if removed > 0 or changed > 0:
+    if scan_mode != "refresh_cached" and (removed > 0 or changed > 0):
         st.info(f"Cache reconciled: removed {removed} deleted shows, refreshed {changed} rematched shows.")
     trigger_rerun()
 
@@ -235,11 +268,17 @@ def render_scan_controls(config):
     )
     st.caption(f"Current scope: {scope_label}")
 
-    action_col1, action_col2, action_col3, action_col4 = st.columns([2, 1, 1, 1])
+    action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns([2, 2, 2, 1, 1, 1])
     with action_col1:
-        if st.button("Start Scan", disabled=state["running"], width="stretch"):
-            start_scan(config)
+        if st.button("Start Full", disabled=state["running"], width="stretch"):
+            start_scan(config, scan_mode="full")
     with action_col2:
+        if st.button("Start Incremental", disabled=state["running"], width="stretch"):
+            start_scan(config, scan_mode="incremental")
+    with action_col3:
+        if st.button("Refresh Cached", disabled=state["running"], width="stretch"):
+            start_scan(config, scan_mode="refresh_cached")
+    with action_col4:
         if st.button(
             "Pause",
             disabled=(not state["running"] or state["paused"]),
@@ -248,7 +287,7 @@ def render_scan_controls(config):
             state["paused"] = True
             state["last_status"] = "Paused"
             trigger_rerun()
-    with action_col3:
+    with action_col5:
         if st.button(
             "Resume",
             disabled=(not state["running"] or not state["paused"]),
@@ -257,7 +296,7 @@ def render_scan_controls(config):
             state["paused"] = False
             state["last_status"] = "Resuming"
             trigger_rerun()
-    with action_col4:
+    with action_col6:
         if st.button("Cancel", disabled=not state["running"], width="stretch"):
             state["cancel_requested"] = True
             state["last_status"] = "Cancelling..."
@@ -376,6 +415,50 @@ def render_config_editor(config):
         st.session_state["app_config"] = new_config
         st.success("Configuration saved to config.json")
         trigger_rerun()
+
+    st.markdown("---")
+    st.subheader("App Update")
+    st.caption("Checks git origin for newer commits and optionally performs a fast-forward update.")
+
+    if "update_status" not in st.session_state:
+        st.session_state["update_status"] = None
+
+    upd_col1, upd_col2 = st.columns([2, 2])
+    with upd_col1:
+        if st.button("Check for updates", key="check_updates_btn", width="stretch"):
+            st.session_state["update_status"] = check_app_updates(fetch_remote=True)
+            trigger_rerun()
+    with upd_col2:
+        current_status = st.session_state.get("update_status") or {}
+        can_update = (
+            bool(current_status.get("ok"))
+            and int(current_status.get("behind", 0) or 0) > 0
+            and int(current_status.get("ahead", 0) or 0) == 0
+        )
+        if st.button("Update now", key="update_now_btn", disabled=not can_update, width="stretch"):
+            ok, msg, status = update_app_from_remote()
+            st.session_state["update_status"] = status
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+            trigger_rerun()
+
+    status = st.session_state.get("update_status")
+    if status:
+        if status.get("ok"):
+            st.info(status.get("message", ""))
+            st.caption(
+                f"Branch: {status.get('branch', '?')} | Behind: {status.get('behind', 0)} | "
+                f"Ahead: {status.get('ahead', 0)}"
+            )
+            remote_url = status.get("remote_url")
+            if remote_url:
+                st.caption(f"Remote: {remote_url}")
+        else:
+            st.error(status.get("message", "Failed to check for updates."))
+            if status.get("error"):
+                st.caption(f"Details: {status['error']}")
 
 
 def format_eta(air_date_str):
