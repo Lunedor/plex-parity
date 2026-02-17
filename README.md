@@ -18,11 +18,16 @@ missing episodes and jump directly to Debrid Media Manager to grab what you need
 - Shows upcoming episode schedule with nearest-airing highlights
 - Builds season links for Debrid Media Manager
 - Caches scan results for fast reloads
+- Auto-promotes cached upcoming episodes to missing once their air date passes
 - Supports manual TMDB fixes per show
 - Supports ignore/unignore for noisy episodes or whole shows
 - Supports scan scope:
   - Entire library
   - Only watchlisted TV shows
+  - Supports scan mode:
+    - Incremental (new/changed/active items)
+    - Full re-check (complete library pass)
+    - Refresh cached (re-check cached ongoing/missing shows without full library discovery)
   - Also, perform a quick scan for the specific show after adding the missing episode or episodes to avoid scanning the entire library.
 
 ## Tech Stack
@@ -128,6 +133,7 @@ Then open the local URL shown in terminal (usually `http://localhost:8501`).
    - Upcoming episodes
 4. If mismatch exists, use TMDB override in show settings or `Maintenance`.
 5. If needed, recover ignored items from `Maintenance`.
+6. Open `Settings` to check for app updates and run an in-app fast-forward update (git clone installs).
 
 ## Notes
 
