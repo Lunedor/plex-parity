@@ -2,7 +2,7 @@
 
 Plex Parity is a Streamlit app for tracking missing TV episodes in your Plex library by comparing local episodes against TMDB metadata.
 
-![Plex Parity Dashboard Interface](sample.jpg)
+![Plex Parity Dashboard Interface](sample_1.jpg)
 
 ## Why Plex Parity?
 
