@@ -12,6 +12,7 @@ from plexapi.server import PlexServer
 CONFIG_FILE = "config.json"
 CACHE_FILE = "plex_cache.json"
 SEASON_CACHE_FILE = "tmdb_season_cache.json"
+SCAN_META_FILE = "scan_meta.json"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
 ENDED_STATUSES = {"Ended", "Canceled"}
@@ -128,6 +129,46 @@ def load_results_map_from_cache(cache=None):
 def save_cache(cache):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def load_scan_meta():
+    if os.path.exists(SCAN_META_FILE):
+        try:
+            with open(SCAN_META_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_scan_meta(meta):
+    try:
+        with open(SCAN_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+    except OSError:
+        return
+
+
+def mark_full_scan_completed():
+    meta = load_scan_meta()
+    meta["full_scan_completed"] = True
+    meta["full_scan_completed_at"] = datetime.now().isoformat(timespec="seconds")
+    save_scan_meta(meta)
+
+
+def has_full_scan_completed():
+    meta = load_scan_meta()
+    return bool(meta.get("full_scan_completed"))
+
+
+def cache_has_show_entries(cache=None):
+    source = cache if isinstance(cache, dict) else load_cache()
+    for _, entry in source.items():
+        if isinstance(entry, dict) and entry.get("title"):
+            return True
+    return False
 
 
 def validate_config(config):
@@ -549,15 +590,42 @@ def store_cached_tmdb_season(tmdb_id, season_number, freshness_token, data, seas
     season_cache[key] = data
 
 
+def compact_tmdb_season_payload(season_data):
+    if not isinstance(season_data, dict):
+        return None
+    episodes = []
+    for ep in season_data.get("episodes", []):
+        if not isinstance(ep, dict):
+            continue
+        e_num = ep.get("episode_number")
+        air_date = ep.get("air_date")
+        if not isinstance(e_num, int):
+            continue
+        if not isinstance(air_date, str) or parse_iso_date(air_date) is None:
+            continue
+        episodes.append({"episode_number": e_num, "air_date": air_date})
+    episodes.sort(key=lambda x: x["episode_number"])
+    return {"episodes": episodes}
+
+
 def get_tmdb_season_data(tmdb_id, season_number, config, freshness_token, season_cache):
     cached = load_cached_tmdb_season(tmdb_id, season_number, freshness_token, season_cache)
     if cached is not None:
-        return cached
+        compact_cached = compact_tmdb_season_payload(cached)
+        if compact_cached is not None:
+            if compact_cached != cached:
+                store_cached_tmdb_season(
+                    tmdb_id, season_number, freshness_token, compact_cached, season_cache
+                )
+            return compact_cached
     status_code, s_data = tmdb_get(f"/tv/{tmdb_id}/season/{season_number}", config)
     if status_code != 200 or not s_data:
         return None
-    store_cached_tmdb_season(tmdb_id, season_number, freshness_token, s_data, season_cache)
-    return s_data
+    compact_data = compact_tmdb_season_payload(s_data)
+    if compact_data is None:
+        return None
+    store_cached_tmdb_season(tmdb_id, season_number, freshness_token, compact_data, season_cache)
+    return compact_data
 
 
 def collect_missing_and_upcoming_from_season_data(
@@ -697,7 +765,10 @@ def evaluate_show(show, cache_entry, config, today, deep_audit=False):
         s_data = get_tmdb_season_data(tmdb_id, s_num, config, tmdb_freshness_token, season_cache)
         if s_data is None:
             continue
-        if cached_before is None:
+        cached_after = load_cached_tmdb_season(
+            tmdb_id, s_num, tmdb_freshness_token, season_cache
+        )
+        if cached_before is None or cached_after != cached_before:
             season_cache_changed = True
         collect_missing_and_upcoming_from_season_data(
             s_data, s_num, local_episodes, today, raw_missing, fresh_upcoming
@@ -852,6 +923,8 @@ def process_scan_batch(state, config, batch_size=SCAN_BATCH_SIZE):
         state["paused"] = False
         state["last_status"] = "Scan complete"
         save_cache(state["cache"])
+        if state.get("scan_mode") == "full":
+            mark_full_scan_completed()
 
     return state
 
