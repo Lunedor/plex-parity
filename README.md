@@ -4,16 +4,6 @@ Plex Parity is a Streamlit app for tracking missing TV episodes in your Plex lib
 
 ![Plex Parity Dashboard Interface](sample_1.jpg)
 
-## Security
-
-Important: keep tokens out of source control. `config.json`, `plex_cache.json`, and `__pycache__/` are ignored by `.gitignore`.
-You can also use environment variables instead of storing credentials on disk:
-- `PLEX_BASE_URL`
-- `PLEX_TOKEN`
-- `TMDB_API_KEY`
-- `PLEX_LIBRARY_NAME`
-- `PLEX_SCAN_SCOPE`
-
 ## Why Plex Parity?
 
 If you're like me, you find -arr apps overly complex for simple library tracking, 
@@ -113,6 +103,16 @@ Example `config.json`:
 `scan_scope` values:
 - `all_library`: scans all TV shows in your selected Plex library
 - `watchlist_only`: scans only watchlisted TV shows (movies excluded automatically)
+
+## Security
+
+Important: keep tokens out of source control. `config.json`, `plex_cache.json`, and `__pycache__/` are ignored by `.gitignore`.
+You can also use environment variables instead of storing credentials on disk:
+- `PLEX_BASE_URL`
+- `PLEX_TOKEN`
+- `TMDB_API_KEY`
+- `PLEX_LIBRARY_NAME`
+- `PLEX_SCAN_SCOPE`
 
 ## Getting API Credentials
 
