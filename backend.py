@@ -1101,7 +1101,7 @@ def check_app_updates(fetch_remote=True):
     }
 
 
-def update_app_from_remote():
+def update_app_from_remote(auto_stash=True):
     status = check_app_updates(fetch_remote=True)
     if not status.get("ok"):
         return False, status.get("message", "Update check failed."), status
@@ -1118,15 +1118,29 @@ def update_app_from_remote():
     ok, dirty_out, dirty_err = run_git_command(["status", "--porcelain"])
     if not ok:
         return False, "Failed to check local git working tree state.", {"error": dirty_err, **status}
-    if dirty_out.strip():
-        return (
-            False,
-            "Update blocked: you have local uncommitted changes. Commit or stash them, then try again.",
-            {"error": "working tree is dirty", **status},
+
+    dirty = bool(dirty_out.strip())
+    stashed = False
+    if dirty:
+        if not auto_stash:
+            return (
+                False,
+                "Update blocked: you have local uncommitted changes. Commit or stash them, then try again.",
+                {"error": "working tree is dirty", **status},
+            )
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ok, stash_out, stash_err = run_git_command(
+            ["stash", "push", "--include-untracked", "-m", f"Plex Parity auto-stash before update ({stamp})"],
+            timeout=60,
         )
+        if not ok:
+            return False, "Update failed: could not stash local changes.", {"error": stash_err, **status}
+        stashed = True
 
     ok, _, err = run_git_command(["pull", "--ff-only", "origin", branch], timeout=60)
     if not ok:
+        if stashed:
+            run_git_command(["stash", "pop"], timeout=60)
         detail = err.strip() if isinstance(err, str) else ""
         if detail:
             return (
@@ -1136,5 +1150,17 @@ def update_app_from_remote():
             )
         return False, "Update failed. Fast-forward pull was not possible.", {"error": err, **status}
 
+    if stashed:
+        ok, pop_out, pop_err = run_git_command(["stash", "pop"], timeout=60)
+        if not ok:
+            detail = pop_err.strip() if isinstance(pop_err, str) else ""
+            msg = (
+                "Update completed, but restoring your stashed local changes failed. "
+                "Resolve manually with `git stash list` / `git stash pop`."
+            )
+            return False, msg, {"error": detail or pop_err, **status}
+
     refreshed = check_app_updates(fetch_remote=False)
+    if stashed:
+        return True, "Update completed (auto-stash applied). Restart app to load changes.", refreshed
     return True, "Update completed. Restart the app to ensure all changes are loaded.", refreshed
