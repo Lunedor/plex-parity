@@ -4,6 +4,16 @@ Plex Parity is a Streamlit app for tracking missing TV episodes in your Plex lib
 
 ![Plex Parity Dashboard Interface](sample_1.jpg)
 
+## Security
+
+Important: keep tokens out of source control. `config.json`, `plex_cache.json`, and `__pycache__/` are ignored by `.gitignore`.
+You can also use environment variables instead of storing credentials on disk:
+- `PLEX_BASE_URL`
+- `PLEX_TOKEN`
+- `TMDB_API_KEY`
+- `PLEX_LIBRARY_NAME`
+- `PLEX_SCAN_SCOPE`
+
 ## Why Plex Parity?
 
 If you're like me, you find -arr apps overly complex for simple library tracking, 
@@ -24,11 +34,13 @@ missing episodes and jump directly to Debrid Media Manager to grab what you need
 - Supports scan scope:
   - Entire library
   - Only watchlisted TV shows
-  - Supports scan mode:
+- Supports scan mode:
     - Incremental (new/changed/active items)
     - Full re-check (complete library pass)
     - Refresh cached (re-check cached ongoing/missing shows without full library discovery)
   - Also, perform a quick scan for the specific show after adding the missing episode or episodes to avoid scanning the entire library.
+- Uses lightweight TMDB checks for common incremental runs and reserves deep season audit for full scans or detected gaps
+- Reuses HTTP connections via `requests.Session()` and caches TMDB season responses on disk
 
 ## Tech Stack
 
@@ -84,6 +96,7 @@ On first run, the app creates `config.json` if missing.
 You can configure values in two ways:
 - directly in `config.json`
 - from the app in `Settings`
+- via environment variables (takes precedence over `config.json` when set)
 
 Example `config.json`:
 
