@@ -1,0 +1,6 @@
+config.json
+plex_cache.json
+tmdb_season_cache.json
+__pycache__/
+*.py[cod]
+.venv/
