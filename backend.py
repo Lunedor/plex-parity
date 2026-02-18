@@ -11,11 +11,20 @@ from plexapi.server import PlexServer
 
 CONFIG_FILE = "config.json"
 CACHE_FILE = "plex_cache.json"
+SEASON_CACHE_FILE = "tmdb_season_cache.json"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
 ENDED_STATUSES = {"Ended", "Canceled"}
 REQUEST_TIMEOUT = 15
 SCAN_BATCH_SIZE = 3
+HTTP_SESSION = requests.Session()
+ENV_CONFIG_MAP = {
+    "PLEX_BASE_URL": "plex_base_url",
+    "PLEX_TOKEN": "plex_token",
+    "TMDB_API_KEY": "tmdb_api_key",
+    "PLEX_LIBRARY_NAME": "library_name",
+    "PLEX_SCAN_SCOPE": "scan_scope",
+}
 
 DEFAULT_CONFIG = {
     "plex_base_url": "http://127.0.0.1:32400",
@@ -33,7 +42,7 @@ def normalize_title(value):
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
+        return apply_env_overrides(DEFAULT_CONFIG.copy())
 
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -42,14 +51,24 @@ def load_config():
                 return DEFAULT_CONFIG.copy()
             merged = DEFAULT_CONFIG.copy()
             merged.update(data)
-            return merged
+            return apply_env_overrides(merged)
     except (json.JSONDecodeError, OSError):
-        return DEFAULT_CONFIG.copy()
+        return apply_env_overrides(DEFAULT_CONFIG.copy())
 
 
 def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def apply_env_overrides(config):
+    output = dict(config)
+    for env_name, config_key in ENV_CONFIG_MAP.items():
+        value = os.getenv(env_name)
+        if value is not None and value.strip():
+            output[config_key] = value.strip()
+    output["scan_scope"] = normalize_scan_scope(output.get("scan_scope"))
+    return output
 
 
 def load_cache():
@@ -59,6 +78,26 @@ def load_cache():
             if isinstance(data, dict):
                 return data
     return {}
+
+
+def load_tmdb_season_cache():
+    if os.path.exists(SEASON_CACHE_FILE):
+        try:
+            with open(SEASON_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_tmdb_season_cache(cache):
+    try:
+        with open(SEASON_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except OSError:
+        return
 
 
 def load_results_map_from_cache(cache=None):
@@ -202,7 +241,7 @@ def tmdb_get(path, config, params=None):
         request_params.update(params)
 
     try:
-        response = requests.get(
+        response = HTTP_SESSION.get(
             f"{TMDB_BASE_URL}{path}", params=request_params, timeout=REQUEST_TIMEOUT
         )
         if response.status_code != 200:
@@ -465,7 +504,91 @@ def build_cached_refresh_key_list(cache):
     return sorted(set(keys))
 
 
-def evaluate_show(show, cache_entry, config, today):
+def normalize_episode_code(season_number, episode_number):
+    if not isinstance(season_number, int) or not isinstance(episode_number, int):
+        return None
+    return f"S{season_number:02d}E{episode_number:02d}"
+
+
+def parse_episode_code(code):
+    if not isinstance(code, str):
+        return None, None
+    match = re.match(r"^S(\d{2})E(\d{2})$", code)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def remove_resolved_missing(raw_missing, local_episodes):
+    cleaned = []
+    for code in raw_missing:
+        s_num, e_num = parse_episode_code(code)
+        if s_num is None or e_num is None:
+            continue
+        if e_num in local_episodes.get(s_num, []):
+            continue
+        cleaned.append(code)
+    return sorted(set(cleaned))
+
+
+def build_season_cache_key(tmdb_id, season_number, freshness_token):
+    token = freshness_token or "unknown"
+    return f"{tmdb_id}:{season_number}:{token}"
+
+
+def load_cached_tmdb_season(tmdb_id, season_number, freshness_token, season_cache):
+    key = build_season_cache_key(tmdb_id, season_number, freshness_token)
+    data = season_cache.get(key)
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def store_cached_tmdb_season(tmdb_id, season_number, freshness_token, data, season_cache):
+    key = build_season_cache_key(tmdb_id, season_number, freshness_token)
+    season_cache[key] = data
+
+
+def get_tmdb_season_data(tmdb_id, season_number, config, freshness_token, season_cache):
+    cached = load_cached_tmdb_season(tmdb_id, season_number, freshness_token, season_cache)
+    if cached is not None:
+        return cached
+    status_code, s_data = tmdb_get(f"/tv/{tmdb_id}/season/{season_number}", config)
+    if status_code != 200 or not s_data:
+        return None
+    store_cached_tmdb_season(tmdb_id, season_number, freshness_token, s_data, season_cache)
+    return s_data
+
+
+def collect_missing_and_upcoming_from_season_data(
+    season_data, season_number, local_episodes, today, raw_missing, upcoming_items
+):
+    if not isinstance(season_data, dict):
+        return
+
+    for ep in season_data.get("episodes", []):
+        air_date_str = ep.get("air_date")
+        if not air_date_str:
+            continue
+        try:
+            air_date = datetime.strptime(air_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        e_num = ep.get("episode_number")
+        if not isinstance(e_num, int):
+            continue
+        code = normalize_episode_code(season_number, e_num)
+        if code is None:
+            continue
+
+        if air_date <= today:
+            if e_num not in local_episodes.get(season_number, []):
+                raw_missing.append(code)
+        else:
+            upcoming_items.append({"date": str(air_date), "code": code})
+
+
+def evaluate_show(show, cache_entry, config, today, deep_audit=False):
     show_title = show.title
     show_year = show.year
 
@@ -514,43 +637,78 @@ def evaluate_show(show, cache_entry, config, today):
             imdb_id = external_ids_data.get("imdb_id")
 
     local_episodes = {s.index: [e.index for e in s.episodes()] for s in show.seasons()}
+    cached_raw_missing = cache_entry.get("missing_raw", cache_entry.get("missing", [])) or []
+    if not isinstance(cached_raw_missing, list):
+        cached_raw_missing = []
+    raw_missing = remove_resolved_missing(
+        [code for code in cached_raw_missing if isinstance(code, str)], local_episodes
+    )
 
-    raw_missing = []
-    upcoming_items = []
+    upcoming_items = normalize_upcoming_list({"upcoming_all": cache_entry.get("upcoming_all", [])})
+    if not upcoming_items and isinstance(cache_entry.get("next_air"), dict):
+        upcoming_items = normalize_upcoming_list({"next_air": cache_entry.get("next_air")})
 
-    for season in details.get("seasons", []):
-        s_num = season.get("season_number")
-        if s_num in (None, 0):
-            continue
-        if s_num > max(local_episodes.keys(), default=0) + 1:
-            continue
+    fresh_upcoming = []
+    next_ep = details.get("next_episode_to_air") or {}
+    next_date = parse_iso_date(next_ep.get("air_date"))
+    next_code = normalize_episode_code(next_ep.get("season_number"), next_ep.get("episode_number"))
+    if next_date and next_code and next_date > today:
+        fresh_upcoming.append({"date": str(next_date), "code": next_code})
 
-        status_code, s_data = tmdb_get(f"/tv/{tmdb_id}/season/{s_num}", config)
-        if status_code != 200 or not s_data:
-            continue
+    last_ep = details.get("last_episode_to_air") or {}
+    last_ep_date = parse_iso_date(last_ep.get("air_date"))
+    last_ep_season = last_ep.get("season_number")
+    last_ep_number = last_ep.get("episode_number")
+    last_ep_code = normalize_episode_code(last_ep_season, last_ep_number)
+    if last_ep_date and last_ep_date <= today and last_ep_code:
+        if last_ep_number not in local_episodes.get(last_ep_season, []):
+            raw_missing.append(last_ep_code)
 
-        for ep in s_data.get("episodes", []):
-            air_date_str = ep.get("air_date")
-            if not air_date_str:
+    tmdb_freshness_token = details.get("last_air_date") or (
+        str(next_date) if next_date else ""
+    )
+    season_cache = load_tmdb_season_cache()
+    season_cache_changed = False
+
+    should_probe_current_season = False
+    if isinstance(last_ep_season, int) and isinstance(last_ep_number, int):
+        max_local = max(local_episodes.get(last_ep_season, [0]) or [0])
+        if max_local + 1 < last_ep_number:
+            should_probe_current_season = True
+
+    if deep_audit:
+        seasons_to_scan = []
+        for season in details.get("seasons", []):
+            s_num = season.get("season_number")
+            if s_num in (None, 0):
                 continue
-
-            try:
-                air_date = datetime.strptime(air_date_str, "%Y-%m-%d").date()
-            except ValueError:
+            if s_num > max(local_episodes.keys(), default=0) + 1:
                 continue
+            seasons_to_scan.append(s_num)
+    else:
+        seasons_to_scan = []
+        if should_probe_current_season and isinstance(last_ep_season, int) and last_ep_season > 0:
+            seasons_to_scan.append(last_ep_season)
 
-            e_num = ep.get("episode_number")
-            if not isinstance(e_num, int):
-                continue
+    for s_num in sorted(set(seasons_to_scan)):
+        cached_before = load_cached_tmdb_season(
+            tmdb_id, s_num, tmdb_freshness_token, season_cache
+        )
+        s_data = get_tmdb_season_data(tmdb_id, s_num, config, tmdb_freshness_token, season_cache)
+        if s_data is None:
+            continue
+        if cached_before is None:
+            season_cache_changed = True
+        collect_missing_and_upcoming_from_season_data(
+            s_data, s_num, local_episodes, today, raw_missing, fresh_upcoming
+        )
 
-            if air_date <= today:
-                if e_num not in local_episodes.get(s_num, []):
-                    raw_missing.append(f"S{s_num:02d}E{e_num:02d}")
-            else:
-                upcoming_items.append({"date": str(air_date), "code": f"S{s_num:02d}E{e_num:02d}"})
+    if season_cache_changed:
+        save_tmdb_season_cache(season_cache)
 
     raw_missing = sorted(set(raw_missing))
     upcoming = normalize_upcoming_list({"upcoming_all": upcoming_items})
+    upcoming = normalize_upcoming_list({"upcoming_all": upcoming + fresh_upcoming})
     next_air = upcoming[0] if upcoming else None
     visible_missing = apply_ignored_missing(cache_entry, raw_missing)
 
@@ -620,7 +778,7 @@ def reconcile_cache_with_library(cache, shows):
     return removed, changed
 
 
-def init_scan_state(show_keys, cache):
+def init_scan_state(show_keys, cache, deep_audit=False, scan_mode="full"):
     return {
         "running": True,
         "paused": False,
@@ -628,10 +786,12 @@ def init_scan_state(show_keys, cache):
         "index": 0,
         "total": len(show_keys),
         "show_keys": show_keys,
+        "scan_mode": scan_mode,
         "results_map": {},
         "unmatched": [],
         "last_status": "Starting scan...",
         "cache": cache,
+        "deep_audit": bool(deep_audit),
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "error": None,
     }
@@ -659,7 +819,13 @@ def process_scan_batch(state, config, batch_size=SCAN_BATCH_SIZE):
         try:
             show = plex.fetchItem(f"/library/metadata/{rating_key}")
             cache_key, cache_entry = get_or_create_cache_entry(state["cache"], show)
-            result, unmatched = evaluate_show(show, cache_entry, config, today)
+            result, unmatched = evaluate_show(
+                show,
+                cache_entry,
+                config,
+                today,
+                deep_audit=bool(state.get("deep_audit", False)),
+            )
             state["cache"][cache_key] = cache_entry
 
             if result is not None:
@@ -710,7 +876,7 @@ def refresh_single_show(cache_key, config, results_map=None):
         return False, f"Failed to load show from Plex: {exc}", None
 
     _, cache_entry = get_or_create_cache_entry(cache, show)
-    result, unmatched = evaluate_show(show, cache_entry, config, datetime.now().date())
+    result, unmatched = evaluate_show(show, cache_entry, config, datetime.now().date(), deep_audit=False)
     cache[cache_key] = cache_entry
     save_cache(cache)
 
@@ -949,8 +1115,25 @@ def update_app_from_remote():
     if ahead > 0:
         return False, "Local branch is ahead/diverged. Update skipped to avoid conflicts.", status
 
+    ok, dirty_out, dirty_err = run_git_command(["status", "--porcelain"])
+    if not ok:
+        return False, "Failed to check local git working tree state.", {"error": dirty_err, **status}
+    if dirty_out.strip():
+        return (
+            False,
+            "Update blocked: you have local uncommitted changes. Commit or stash them, then try again.",
+            {"error": "working tree is dirty", **status},
+        )
+
     ok, _, err = run_git_command(["pull", "--ff-only", "origin", branch], timeout=60)
     if not ok:
+        detail = err.strip() if isinstance(err, str) else ""
+        if detail:
+            return (
+                False,
+                f"Update failed. Fast-forward pull was not possible. Git says: {detail}",
+                {"error": detail, **status},
+            )
         return False, "Update failed. Fast-forward pull was not possible.", {"error": err, **status}
 
     refreshed = check_app_updates(fetch_remote=False)
