@@ -103,7 +103,12 @@ def start_scan(config, scan_mode="full"):
         else:
             st.info("No shows available to scan.")
         return
-    new_state = init_scan_state(show_keys, cache)
+    new_state = init_scan_state(
+        show_keys,
+        cache,
+        deep_audit=(scan_mode == "full"),
+        scan_mode=scan_mode,
+    )
     if scan_mode == "full":
         new_state["last_status"] = "Starting full scan..."
     elif scan_mode == "incremental":
@@ -267,6 +272,16 @@ def render_scan_controls(config):
         else "All Library Shows"
     )
     st.caption(f"Current scope: {scope_label}")
+    current_mode = state.get("scan_mode", "idle")
+    tmdb_mode_label = "Full audit" if state.get("deep_audit") else "Lightweight"
+    if not state.get("running"):
+        if current_mode == "full":
+            tmdb_mode_label = "Full audit"
+        elif current_mode in {"incremental", "refresh_cached"}:
+            tmdb_mode_label = "Lightweight"
+        else:
+            tmdb_mode_label = "Lightweight"
+    st.caption(f"TMDB call mode: {tmdb_mode_label}")
 
     action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns([2, 2, 2, 1, 1, 1])
     with action_col1:
@@ -422,12 +437,14 @@ def render_config_editor(config):
 
     if "update_status" not in st.session_state:
         st.session_state["update_status"] = None
+    if "update_feedback" not in st.session_state:
+        st.session_state["update_feedback"] = None
 
     upd_col1, upd_col2 = st.columns([2, 2])
     with upd_col1:
         if st.button("Check for updates", key="check_updates_btn", width="stretch"):
             st.session_state["update_status"] = check_app_updates(fetch_remote=True)
-            trigger_rerun()
+            st.session_state["update_feedback"] = None
     with upd_col2:
         current_status = st.session_state.get("update_status") or {}
         can_update = (
@@ -439,12 +456,22 @@ def render_config_editor(config):
             ok, msg, status = update_app_from_remote()
             st.session_state["update_status"] = status
             if ok:
-                st.success(msg)
+                st.session_state["update_feedback"] = {"level": "success", "text": msg}
             else:
-                st.error(msg)
-            trigger_rerun()
+                st.session_state["update_feedback"] = {"level": "error", "text": msg}
 
     status = st.session_state.get("update_status")
+    feedback = st.session_state.get("update_feedback")
+    if feedback:
+        if feedback.get("level") == "success":
+            st.success(feedback.get("text", ""))
+        elif feedback.get("level") == "error":
+            st.error(feedback.get("text", ""))
+            if status and status.get("error"):
+                st.caption(f"Details: {status['error']}")
+        else:
+            st.info(feedback.get("text", ""))
+
     if status:
         if status.get("ok"):
             st.info(status.get("message", ""))
@@ -750,7 +777,7 @@ def run_app():
     st.set_page_config(page_title="Plex Parity", layout="wide")
     apply_global_style()
     st.title("Plex Parity")
-    st.caption("Track your plex library for tv series, fix mappings quickly, and prioritize what airs next.")
+    st.caption("Track library freshness, fix mappings quickly, and prioritize what airs next.")
 
     if "app_config" not in st.session_state:
         st.session_state["app_config"] = load_config()
