@@ -27,9 +27,13 @@ ENV_CONFIG_MAP = {
     "PLEX_LIBRARY_NAME": "library_name",
     "PLEX_SCAN_SCOPE": "scan_scope",
     "INCLUDE_DMM_LINK": "include_dmm_link",
-    "USENET_PROVIDER": "usenet_provider",
-    "USENET_API_KEY": "usenet_api_key",
-    "USENET_WEB_URL_TEMPLATE": "usenet_web_url_template",
+    "INDEXER_PROVIDER": "indexer_provider",
+    "INDEXER_API_KEY": "indexer_api_key",
+    "INDEXER_WEB_URL_TEMPLATE": "indexer_web_url_template",
+    # Backward compatibility env names.
+    "USENET_PROVIDER": "indexer_provider",
+    "USENET_API_KEY": "indexer_api_key",
+    "USENET_WEB_URL_TEMPLATE": "indexer_web_url_template",
     # Backward compatibility with previous env names.
     "MISSING_LINK_PROVIDER": "secondary_missing_link_provider",
     "MISSING_LINK_BASE_URL": "secondary_missing_link_base_url",
@@ -43,9 +47,15 @@ DEFAULT_CONFIG = {
     "library_name": "TV Shows",
     "scan_scope": "all_library",
     "include_dmm_link": True,
+    "indexer_provider": "none",
+    "indexer_api_key": "",
+    "indexer_web_url_template": "",
+    "indexer_provider_profiles": {},
+    # Backward compatibility keys.
     "usenet_provider": "none",
     "usenet_api_key": "",
     "usenet_web_url_template": "",
+    "usenet_provider_profiles": {},
     "dmm_base_url": "https://debridmediamanager.com",
     # Backward compatibility keys (legacy).
     "secondary_missing_link_provider": "none",
@@ -88,14 +98,23 @@ def apply_env_overrides(config):
             output[config_key] = value.strip()
     output["scan_scope"] = normalize_scan_scope(output.get("scan_scope"))
     output["include_dmm_link"] = normalize_bool_flag(output.get("include_dmm_link"), default=True)
-    output["usenet_provider"] = normalize_missing_link_provider(output.get("usenet_provider"))
+    output["indexer_provider"] = normalize_indexer_provider(
+        output.get("indexer_provider", output.get("usenet_provider"))
+    )
     # Legacy fallback: if new keys are empty, reuse older secondary_* keys.
-    if output.get("usenet_provider") == "none":
-        output["usenet_provider"] = normalize_missing_link_provider(
+    if output.get("indexer_provider") == "none":
+        output["indexer_provider"] = normalize_indexer_provider(
             output.get("secondary_missing_link_provider")
         )
-    if not str(output.get("usenet_api_key", "") or "").strip():
-        output["usenet_api_key"] = str(output.get("secondary_missing_link_api_key", "") or "").strip()
+    if not str(output.get("indexer_api_key", "") or "").strip():
+        output["indexer_api_key"] = str(
+            output.get("usenet_api_key", output.get("secondary_missing_link_api_key", "")) or ""
+        ).strip()
+    if not str(output.get("indexer_web_url_template", "") or "").strip():
+        output["indexer_web_url_template"] = str(output.get("usenet_web_url_template", "") or "").strip()
+    if not isinstance(output.get("indexer_provider_profiles"), dict):
+        legacy_profiles = output.get("usenet_provider_profiles")
+        output["indexer_provider_profiles"] = legacy_profiles if isinstance(legacy_profiles, dict) else {}
     return output
 
 
@@ -217,13 +236,18 @@ def normalize_scan_scope(scope):
     return "all_library"
 
 
-def normalize_missing_link_provider(provider):
+def normalize_indexer_provider(provider):
     normalized = str(provider or "").strip().lower()
     aliases = {"tornzab": "torznab"}
     normalized = aliases.get(normalized, normalized)
     if normalized in {"newznab", "nzbhydra", "torznab", "prowlarr", "torbox", "jackett", "custom"}:
         return normalized
     return "none"
+
+
+def normalize_missing_link_provider(provider):
+    # Backward compatible alias.
+    return normalize_indexer_provider(provider)
 
 
 def normalize_bool_flag(value, default=False):
@@ -1141,13 +1165,15 @@ def _normalize_imdb_for_newznab(imdb_id):
     return token
 
 
-def _build_usenet_missing_link(item, missing_code, season_num, episode_num, config):
-    provider = normalize_missing_link_provider(config.get("usenet_provider"))
+def _build_indexer_missing_link(item, missing_code, season_num, episode_num, config):
+    provider = normalize_indexer_provider(
+        config.get("indexer_provider", config.get("usenet_provider"))
+    )
     if provider == "none":
         return None
 
     query = f"{item.get('title', '')} {missing_code}".strip()
-    api_key = str(config.get("usenet_api_key", "") or "").strip()
+    api_key = str(config.get("indexer_api_key", config.get("usenet_api_key", "")) or "").strip()
     imdb_id = _normalize_imdb_for_newznab(item.get("imdb_id"))
     provider_labels = {
         "nzbhydra": "NZBHydra",
@@ -1159,7 +1185,7 @@ def _build_usenet_missing_link(item, missing_code, season_num, episode_num, conf
         "custom": "Custom",
     }
     provider_label = provider_labels.get(provider, provider.title())
-    web_template = str(config.get("usenet_web_url_template", "") or "").strip()
+    web_template = str(config.get("indexer_web_url_template", config.get("usenet_web_url_template", "")) or "").strip()
     if not web_template:
         return None
 
@@ -1221,6 +1247,11 @@ def _build_usenet_missing_link(item, missing_code, season_num, episode_num, conf
     }
 
 
+def _build_usenet_missing_link(item, missing_code, season_num, episode_num, config):
+    # Backward compatible alias.
+    return _build_indexer_missing_link(item, missing_code, season_num, episode_num, config)
+
+
 def build_missing_episode_links(item, missing_code, config):
     links = []
     season_num = extract_season_number(missing_code)
@@ -1236,11 +1267,11 @@ def build_missing_episode_links(item, missing_code, config):
         )
 
     parsed_season, parsed_episode = parse_episode_code(missing_code)
-    usenet_link = _build_usenet_missing_link(
+    indexer_link = _build_indexer_missing_link(
         item, missing_code, parsed_season, parsed_episode, config
     )
-    if usenet_link:
-        links.append(usenet_link)
+    if indexer_link:
+        links.append(indexer_link)
 
     return links
 
