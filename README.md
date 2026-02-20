@@ -101,10 +101,10 @@ Example `config.json`:
   "scan_scope": "all_library",
   "include_dmm_link": true,
   "dmm_base_url": "https://debridmediamanager.com",
-  "usenet_provider": "none",
-  "usenet_api_key": "",
-  "usenet_web_url_template": "",
-  "usenet_provider_profiles": {}
+  "indexer_provider": "none",
+  "indexer_api_key": "",
+  "indexer_web_url_template": "",
+  "indexer_provider_profiles": {}
 }
 ```
 
@@ -114,11 +114,11 @@ Example `config.json`:
 
 Missing link provider values:
 - `include_dmm_link`: enable/disable DMM shortcut links
-- `usenet_provider`: `none`, `newznab`, `nzbhydra`, `torznab`, `prowlarr`, `torbox`, `jackett`, `custom`
-- `usenet_web_url_template`: provider search URL template; supports:
+- `indexer_provider`: `none`, `newznab`, `nzbhydra`, `torznab`, `prowlarr`, `torbox`, `jackett`, `custom`
+- `indexer_web_url_template`: provider search URL template; supports:
   `{query}`, `{query_url}`, `{title}`, `{title_url}`, `{code}`, `{code_url}`, `{season}`, `{episode}`, `{imdbid}`, `{apikey}`
-- `usenet_api_key`: optional; used by template when `{apikey}` is present
-- `usenet_provider_profiles`: auto-managed provider-specific saved template/key values
+- `indexer_api_key`: optional; used by template when `{apikey}` is present
+- `indexer_provider_profiles`: auto-managed provider-specific saved template/key values
 
 Provider defaults and notes:
 - `nzbhydra`: default template `http://127.0.0.1:5076/?query={query_url}`
@@ -136,9 +136,13 @@ You can also use environment variables instead of storing credentials on disk:
 - `PLEX_LIBRARY_NAME`
 - `PLEX_SCAN_SCOPE`
 - `INCLUDE_DMM_LINK`
-- `USENET_PROVIDER`
-- `USENET_API_KEY`
-- `USENET_WEB_URL_TEMPLATE`
+- `INDEXER_PROVIDER`
+- `INDEXER_API_KEY`
+- `INDEXER_WEB_URL_TEMPLATE`
+
+Legacy compatibility:
+- Old env vars `USENET_PROVIDER`, `USENET_API_KEY`, `USENET_WEB_URL_TEMPLATE` are still accepted.
+- Old config keys (`usenet_*`) are still read automatically.
 
 ## Getting API Credentials
 
