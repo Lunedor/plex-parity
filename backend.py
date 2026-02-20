@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from difflib import SequenceMatcher
+from urllib.parse import urlencode
 
 import requests
 from plexapi.server import PlexServer
@@ -25,6 +26,14 @@ ENV_CONFIG_MAP = {
     "TMDB_API_KEY": "tmdb_api_key",
     "PLEX_LIBRARY_NAME": "library_name",
     "PLEX_SCAN_SCOPE": "scan_scope",
+    "INCLUDE_DMM_LINK": "include_dmm_link",
+    "USENET_PROVIDER": "usenet_provider",
+    "USENET_API_KEY": "usenet_api_key",
+    "USENET_WEB_URL_TEMPLATE": "usenet_web_url_template",
+    # Backward compatibility with previous env names.
+    "MISSING_LINK_PROVIDER": "secondary_missing_link_provider",
+    "MISSING_LINK_BASE_URL": "secondary_missing_link_base_url",
+    "MISSING_LINK_API_KEY": "secondary_missing_link_api_key",
 }
 
 DEFAULT_CONFIG = {
@@ -33,6 +42,15 @@ DEFAULT_CONFIG = {
     "tmdb_api_key": "",
     "library_name": "TV Shows",
     "scan_scope": "all_library",
+    "include_dmm_link": True,
+    "usenet_provider": "none",
+    "usenet_api_key": "",
+    "usenet_web_url_template": "",
+    "dmm_base_url": "https://debridmediamanager.com",
+    # Backward compatibility keys (legacy).
+    "secondary_missing_link_provider": "none",
+    "secondary_missing_link_base_url": "",
+    "secondary_missing_link_api_key": "",
 }
 
 
@@ -69,6 +87,15 @@ def apply_env_overrides(config):
         if value is not None and value.strip():
             output[config_key] = value.strip()
     output["scan_scope"] = normalize_scan_scope(output.get("scan_scope"))
+    output["include_dmm_link"] = normalize_bool_flag(output.get("include_dmm_link"), default=True)
+    output["usenet_provider"] = normalize_missing_link_provider(output.get("usenet_provider"))
+    # Legacy fallback: if new keys are empty, reuse older secondary_* keys.
+    if output.get("usenet_provider") == "none":
+        output["usenet_provider"] = normalize_missing_link_provider(
+            output.get("secondary_missing_link_provider")
+        )
+    if not str(output.get("usenet_api_key", "") or "").strip():
+        output["usenet_api_key"] = str(output.get("secondary_missing_link_api_key", "") or "").strip()
     return output
 
 
@@ -188,6 +215,28 @@ def normalize_scan_scope(scope):
     if scope == "watchlist_only":
         return "watchlist_only"
     return "all_library"
+
+
+def normalize_missing_link_provider(provider):
+    normalized = str(provider or "").strip().lower()
+    aliases = {"tornzab": "torznab"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized in {"newznab", "nzbhydra", "torznab", "prowlarr", "torbox", "jackett", "custom"}:
+        return normalized
+    return "none"
+
+
+def normalize_bool_flag(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def show_cache_key(show):
@@ -1074,6 +1123,126 @@ def extract_season_number(code):
     if not match:
         return None
     return int(match.group(1))
+
+
+def _normalize_base_url(value):
+    return str(value or "").strip().rstrip("/")
+
+
+def _normalize_imdb_for_newznab(imdb_id):
+    if not isinstance(imdb_id, str):
+        return None
+    token = imdb_id.strip()
+    if not token:
+        return None
+    lower = token.lower()
+    if lower.startswith("tt") and token[2:].isdigit():
+        return token[2:]
+    return token
+
+
+def _build_usenet_missing_link(item, missing_code, season_num, episode_num, config):
+    provider = normalize_missing_link_provider(config.get("usenet_provider"))
+    if provider == "none":
+        return None
+
+    query = f"{item.get('title', '')} {missing_code}".strip()
+    api_key = str(config.get("usenet_api_key", "") or "").strip()
+    imdb_id = _normalize_imdb_for_newznab(item.get("imdb_id"))
+    provider_labels = {
+        "nzbhydra": "NZBHydra",
+        "newznab": "Newznab",
+        "torznab": "Torznab",
+        "prowlarr": "Prowlarr",
+        "torbox": "TorBox",
+        "jackett": "Jackett",
+        "custom": "Custom",
+    }
+    provider_label = provider_labels.get(provider, provider.title())
+    web_template = str(config.get("usenet_web_url_template", "") or "").strip()
+    if not web_template:
+        return None
+
+    supported_tokens = {
+        "{query}",
+        "{query_url}",
+        "{title}",
+        "{title_url}",
+        "{code}",
+        "{code_url}",
+        "{season}",
+        "{episode}",
+        "{imdbid}",
+    }
+    if not any(token in web_template for token in supported_tokens):
+        # Convenience fallback: if user provides only a base URL (or static URL),
+        # append a query key so each episode opens a distinct search.
+        sep = "&" if "?" in web_template else "?"
+        provider_query_key = {
+            "nzbhydra": "query",
+            "prowlarr": "query",
+            "torbox": "query",
+            "newznab": "q",
+            "torznab": "q",
+            "jackett": "q",
+            "custom": "q",
+        }
+        query_key = provider_query_key.get(provider, "q")
+        api_key_suffix = f"&apikey={urlencode({'k': api_key})[2:]}" if api_key else ""
+        return {
+            "label": f"{missing_code} - Open {provider_label} Web Search",
+            "url": f"{web_template}{sep}{query_key}={urlencode({'q': query})[2:]}{api_key_suffix}",
+        }
+
+    replacements = {
+        "{query}": query,
+        "{title}": str(item.get("title", "") or ""),
+        "{code}": missing_code,
+        "{season}": str(season_num) if isinstance(season_num, int) else "",
+        "{episode}": str(episode_num) if isinstance(episode_num, int) else "",
+        "{imdbid}": str(imdb_id or ""),
+        "{apikey}": api_key,
+    }
+    resolved_url = web_template
+    for token, value in replacements.items():
+        resolved_url = resolved_url.replace(token, value)
+    if "{query_url}" in resolved_url:
+        resolved_url = resolved_url.replace("{query_url}", urlencode({"q": query})[2:])
+    if "{title_url}" in resolved_url:
+        resolved_url = resolved_url.replace(
+            "{title_url}", urlencode({"q": str(item.get("title", "") or "")})[2:]
+        )
+    if "{code_url}" in resolved_url:
+        resolved_url = resolved_url.replace("{code_url}", urlencode({"q": missing_code})[2:])
+
+    return {
+        "label": f"{missing_code} - Open {provider_label} Web Search",
+        "url": resolved_url,
+    }
+
+
+def build_missing_episode_links(item, missing_code, config):
+    links = []
+    season_num = extract_season_number(missing_code)
+    dmm_enabled = normalize_bool_flag(config.get("include_dmm_link"), default=True)
+    dmm_base_url = _normalize_base_url(config.get("dmm_base_url") or "https://debridmediamanager.com")
+    imdb_id = item.get("imdb_id")
+    if dmm_enabled and season_num is not None and imdb_id and dmm_base_url:
+        links.append(
+            {
+                "label": f"{missing_code} - Open season in DMM",
+                "url": f"{dmm_base_url}/show/{imdb_id}/{season_num}",
+            }
+        )
+
+    parsed_season, parsed_episode = parse_episode_code(missing_code)
+    usenet_link = _build_usenet_missing_link(
+        item, missing_code, parsed_season, parsed_episode, config
+    )
+    if usenet_link:
+        links.append(usenet_link)
+
+    return links
 
 
 def run_git_command(args, timeout=20):
