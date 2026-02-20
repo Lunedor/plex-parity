@@ -6,13 +6,15 @@ from backend import (
     ENDED_STATUSES,
     advance_cached_missing_by_date,
     apply_overrides_to_results,
+    build_missing_episode_links,
     build_cached_refresh_key_list,
     build_scan_key_list,
     check_app_updates,
+    cache_has_show_entries,
     connect_library,
-    extract_season_number,
     filter_shows_for_scan,
     init_scan_state,
+    has_full_scan_completed,
     load_cache,
     load_config,
     load_results_map_from_cache,
@@ -282,16 +284,19 @@ def render_scan_controls(config):
         else:
             tmdb_mode_label = "Lightweight"
     st.caption(f"TMDB call mode: {tmdb_mode_label}")
+    quick_modes_ready = has_full_scan_completed() and cache_has_show_entries()
+    if not quick_modes_ready:
+        st.caption("Incremental and Refresh Cached unlock after one successful full scan with populated cache.")
 
     action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns([2, 2, 2, 1, 1, 1])
     with action_col1:
         if st.button("Start Full", disabled=state["running"], width="stretch"):
             start_scan(config, scan_mode="full")
     with action_col2:
-        if st.button("Start Incremental", disabled=state["running"], width="stretch"):
+        if st.button("Start Incremental", disabled=(state["running"] or not quick_modes_ready), width="stretch"):
             start_scan(config, scan_mode="incremental")
     with action_col3:
-        if st.button("Refresh Cached", disabled=state["running"], width="stretch"):
+        if st.button("Refresh Cached", disabled=(state["running"] or not quick_modes_ready), width="stretch"):
             start_scan(config, scan_mode="refresh_cached")
     with action_col4:
         if st.button(
@@ -404,27 +409,154 @@ def render_tmdb_mapping_maintenance(config):
 
 def render_config_editor(config):
     st.subheader("Configuration")
-    with st.form("config_form"):
-        plex_base_url = st.text_input("Plex Base URL", value=config.get("plex_base_url", ""))
-        plex_token = st.text_input("Plex Token", value=config.get("plex_token", ""), type="password")
-        tmdb_api_key = st.text_input("TMDB API Key", value=config.get("tmdb_api_key", ""), type="password")
-        library_name = st.text_input("Library Name", value=config.get("library_name", ""))
-        scan_scope = st.selectbox(
-            "Scan Scope",
-            options=["all_library", "watchlist_only"],
-            index=0 if config.get("scan_scope", "all_library") != "watchlist_only" else 1,
-            format_func=lambda v: "All Library Shows" if v == "all_library" else "Only Watchlisted TV Shows",
-            help="Watchlist mode only scans TV shows that are present in your Plex watchlist. Movies are excluded.",
+    usenet_provider_options = ["none", "newznab", "nzbhydra", "torznab", "prowlarr", "torbox", "jackett", "custom"]
+    usenet_provider_labels = {
+        "none": "None",
+        "newznab": "Newznab",
+        "nzbhydra": "NZBHydra",
+        "torznab": "Torznab",
+        "prowlarr": "Prowlarr",
+        "torbox": "TorBox",
+        "jackett": "Jackett",
+        "custom": "Custom",
+    }
+    usenet_provider_defaults = {
+        "newznab": "",
+        "nzbhydra": "http://127.0.0.1:5076/?query={query_url}",
+        "torznab": "",
+        "prowlarr": "http://127.0.0.1:9696/",
+        "torbox": "",
+        "jackett": "http://127.0.0.1:9117/UI/Dashboard#search={query_url}",
+        "custom": "",
+    }
+    old_jackett_default = "http://127.0.0.1:9117/UI/Dashboard?search={query_url}"
+
+    if "config_usenet_provider_profiles" not in st.session_state:
+        raw_profiles = config.get("usenet_provider_profiles", {})
+        profiles = raw_profiles.copy() if isinstance(raw_profiles, dict) else {}
+        legacy_provider = config.get("usenet_provider", config.get("secondary_missing_link_provider", "none"))
+        if legacy_provider in usenet_provider_options and legacy_provider != "none":
+            legacy_template = config.get("usenet_web_url_template", "")
+            if legacy_provider == "jackett" and legacy_template == old_jackett_default:
+                legacy_template = usenet_provider_defaults["jackett"]
+            legacy_api_key = config.get("usenet_api_key", config.get("secondary_missing_link_api_key", ""))
+            profiles.setdefault(
+                legacy_provider,
+                {
+                    "usenet_web_url_template": str(legacy_template or ""),
+                    "usenet_api_key": str(legacy_api_key or ""),
+                },
+            )
+        jackett_profile = profiles.get("jackett")
+        if isinstance(jackett_profile, dict):
+            if jackett_profile.get("usenet_web_url_template") == old_jackett_default:
+                jackett_profile["usenet_web_url_template"] = usenet_provider_defaults["jackett"]
+                profiles["jackett"] = jackett_profile
+        st.session_state["config_usenet_provider_profiles"] = profiles
+
+    current_provider = config.get("usenet_provider", config.get("secondary_missing_link_provider", "none"))
+    if current_provider not in usenet_provider_options:
+        current_provider = "none"
+    if "config_selected_usenet_provider" not in st.session_state:
+        st.session_state["config_selected_usenet_provider"] = current_provider
+    if "config_prev_usenet_provider" not in st.session_state:
+        st.session_state["config_prev_usenet_provider"] = st.session_state["config_selected_usenet_provider"]
+    if "config_usenet_web_url_template" not in st.session_state:
+        initial_profile = st.session_state["config_usenet_provider_profiles"].get(
+            st.session_state["config_selected_usenet_provider"], {}
         )
-        submitted = st.form_submit_button("Save Configuration")
+        st.session_state["config_usenet_web_url_template"] = (
+            initial_profile.get("usenet_web_url_template")
+            or usenet_provider_defaults.get(st.session_state["config_selected_usenet_provider"], "")
+        )
+    if "config_usenet_api_key" not in st.session_state:
+        initial_profile = st.session_state["config_usenet_provider_profiles"].get(
+            st.session_state["config_selected_usenet_provider"], {}
+        )
+        st.session_state["config_usenet_api_key"] = initial_profile.get("usenet_api_key", "")
+
+    plex_base_url = st.text_input("Plex Base URL", value=config.get("plex_base_url", ""))
+    plex_token = st.text_input("Plex Token", value=config.get("plex_token", ""), type="password")
+    tmdb_api_key = st.text_input("TMDB API Key", value=config.get("tmdb_api_key", ""), type="password")
+    library_name = st.text_input("Library Name", value=config.get("library_name", ""))
+    scan_scope = st.selectbox(
+        "Scan Scope",
+        options=["all_library", "watchlist_only"],
+        index=0 if config.get("scan_scope", "all_library") != "watchlist_only" else 1,
+        format_func=lambda v: "All Library Shows" if v == "all_library" else "Only Watchlisted TV Shows",
+        help="Watchlist mode only scans TV shows that are present in your Plex watchlist. Movies are excluded.",
+    )
+    include_dmm_link = st.checkbox(
+        "Enable DMM Link",
+        value=bool(config.get("include_dmm_link", True)),
+        help="Disable this if you only want provider links for missing episodes.",
+    )
+    dmm_base_url = st.text_input(
+        "DMM Base URL",
+        value=config.get("dmm_base_url", "https://debridmediamanager.com"),
+        disabled=not include_dmm_link,
+    )
+    usenet_provider = st.selectbox(
+        "Indexer Link Provider",
+        options=usenet_provider_options,
+        index=usenet_provider_options.index(st.session_state["config_selected_usenet_provider"]),
+        format_func=lambda v: usenet_provider_labels.get(v, v),
+    )
+
+    if usenet_provider != st.session_state["config_prev_usenet_provider"]:
+        previous_provider = st.session_state["config_prev_usenet_provider"]
+        if previous_provider != "none":
+            st.session_state["config_usenet_provider_profiles"][previous_provider] = {
+                "usenet_web_url_template": st.session_state.get("config_usenet_web_url_template", ""),
+                "usenet_api_key": st.session_state.get("config_usenet_api_key", ""),
+            }
+        selected_profile = st.session_state["config_usenet_provider_profiles"].get(usenet_provider, {})
+        st.session_state["config_usenet_web_url_template"] = (
+            selected_profile.get("usenet_web_url_template")
+            or usenet_provider_defaults.get(usenet_provider, "")
+        )
+        st.session_state["config_usenet_api_key"] = selected_profile.get("usenet_api_key", "")
+        st.session_state["config_prev_usenet_provider"] = usenet_provider
+        st.session_state["config_selected_usenet_provider"] = usenet_provider
+        trigger_rerun()
+
+    usenet_web_url_template = st.text_input(
+        "Provider Web URL Template",
+        key="config_usenet_web_url_template",
+        help=(
+            "Example: http://127.0.0.1:5076/search?query={query_url}. "
+            "Supported vars: {query}, {query_url}, {title}, {title_url}, {code}, {code_url}, "
+            "{season}, {episode}, {imdbid}, {apikey}."
+        ),
+        disabled=(usenet_provider == "none"),
+    )
+    usenet_api_key = st.text_input(
+        "Provider API Key (Optional)",
+        key="config_usenet_api_key",
+        type="password",
+        help="Used when your URL template includes {apikey}.",
+        disabled=(usenet_provider == "none"),
+    )
+    submitted = st.button("Save Configuration", key="save_config_btn")
 
     if submitted:
+        if usenet_provider != "none":
+            st.session_state["config_usenet_provider_profiles"][usenet_provider] = {
+                "usenet_web_url_template": usenet_web_url_template.strip(),
+                "usenet_api_key": usenet_api_key.strip(),
+            }
         new_config = {
             "plex_base_url": plex_base_url.strip(),
             "plex_token": plex_token.strip(),
             "tmdb_api_key": tmdb_api_key.strip(),
             "library_name": library_name.strip(),
             "scan_scope": scan_scope,
+            "include_dmm_link": bool(include_dmm_link),
+            "dmm_base_url": dmm_base_url.strip(),
+            "usenet_provider": usenet_provider,
+            "usenet_api_key": usenet_api_key.strip(),
+            "usenet_web_url_template": usenet_web_url_template.strip(),
+            "usenet_provider_profiles": st.session_state["config_usenet_provider_profiles"],
         }
         save_config(new_config)
         st.session_state["app_config"] = new_config
@@ -634,17 +766,19 @@ def render_result_item(item, config, show_poster=True):
         st.info("All missing episodes for this show are currently ignored.")
 
     for missing_code in item.get("missing", []):
-        season_num = extract_season_number(missing_code)
         row_col1, row_col2 = st.columns([3, 1])
         with row_col1:
-            imdb_id = item.get("imdb_id")
-            if season_num is None or not imdb_id:
+            links = build_missing_episode_links(item, missing_code, config)
+            if not links:
                 st.write(missing_code)
+            elif len(links) == 1:
+                st.link_button(links[0]["label"], links[0]["url"])
             else:
-                st.link_button(
-                    f"{missing_code} - Open season in DMM",
-                    f"https://debridmediamanager.com/show/{imdb_id}/{season_num}",
-                )
+                link_col1, link_col2 = st.columns(2)
+                with link_col1:
+                    st.link_button(links[0]["label"], links[0]["url"])
+                with link_col2:
+                    st.link_button(links[1]["label"], links[1]["url"])
         with row_col2:
             if st.button("Ignore", key=f"ignore_{item['cache_key']}_{missing_code}"):
                 set_episode_ignore(item["cache_key"], missing_code, ignore=True)
@@ -777,7 +911,7 @@ def run_app():
     st.set_page_config(page_title="Plex Parity", layout="wide")
     apply_global_style()
     st.title("Plex Parity")
-    st.caption("Track your Plex TV series library, fix mappings quickly, and prioritize what airs next.")
+    st.caption("Track library freshness, fix mappings quickly, and prioritize what airs next.")
 
     if "app_config" not in st.session_state:
         st.session_state["app_config"] = load_config()
