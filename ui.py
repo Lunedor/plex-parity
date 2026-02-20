@@ -409,8 +409,8 @@ def render_tmdb_mapping_maintenance(config):
 
 def render_config_editor(config):
     st.subheader("Configuration")
-    usenet_provider_options = ["none", "newznab", "nzbhydra", "torznab", "prowlarr", "torbox", "jackett", "custom"]
-    usenet_provider_labels = {
+    indexer_provider_options = ["none", "newznab", "nzbhydra", "torznab", "prowlarr", "torbox", "jackett", "custom"]
+    indexer_provider_labels = {
         "none": "None",
         "newznab": "Newznab",
         "nzbhydra": "NZBHydra",
@@ -420,7 +420,7 @@ def render_config_editor(config):
         "jackett": "Jackett",
         "custom": "Custom",
     }
-    usenet_provider_defaults = {
+    indexer_provider_defaults = {
         "newznab": "",
         "nzbhydra": "http://127.0.0.1:5076/?query={query_url}",
         "torznab": "",
@@ -431,49 +431,57 @@ def render_config_editor(config):
     }
     old_jackett_default = "http://127.0.0.1:9117/UI/Dashboard?search={query_url}"
 
-    if "config_usenet_provider_profiles" not in st.session_state:
-        raw_profiles = config.get("usenet_provider_profiles", {})
+    if "config_indexer_provider_profiles" not in st.session_state:
+        raw_profiles = config.get("indexer_provider_profiles", config.get("usenet_provider_profiles", {}))
         profiles = raw_profiles.copy() if isinstance(raw_profiles, dict) else {}
-        legacy_provider = config.get("usenet_provider", config.get("secondary_missing_link_provider", "none"))
-        if legacy_provider in usenet_provider_options and legacy_provider != "none":
-            legacy_template = config.get("usenet_web_url_template", "")
+        legacy_provider = config.get(
+            "indexer_provider",
+            config.get("usenet_provider", config.get("secondary_missing_link_provider", "none")),
+        )
+        if legacy_provider in indexer_provider_options and legacy_provider != "none":
+            legacy_template = config.get("indexer_web_url_template", config.get("usenet_web_url_template", ""))
             if legacy_provider == "jackett" and legacy_template == old_jackett_default:
-                legacy_template = usenet_provider_defaults["jackett"]
-            legacy_api_key = config.get("usenet_api_key", config.get("secondary_missing_link_api_key", ""))
+                legacy_template = indexer_provider_defaults["jackett"]
+            legacy_api_key = config.get(
+                "indexer_api_key", config.get("usenet_api_key", config.get("secondary_missing_link_api_key", ""))
+            )
             profiles.setdefault(
                 legacy_provider,
                 {
-                    "usenet_web_url_template": str(legacy_template or ""),
-                    "usenet_api_key": str(legacy_api_key or ""),
+                    "indexer_web_url_template": str(legacy_template or ""),
+                    "indexer_api_key": str(legacy_api_key or ""),
                 },
             )
         jackett_profile = profiles.get("jackett")
         if isinstance(jackett_profile, dict):
-            if jackett_profile.get("usenet_web_url_template") == old_jackett_default:
-                jackett_profile["usenet_web_url_template"] = usenet_provider_defaults["jackett"]
+            if jackett_profile.get("indexer_web_url_template") == old_jackett_default:
+                jackett_profile["indexer_web_url_template"] = indexer_provider_defaults["jackett"]
                 profiles["jackett"] = jackett_profile
-        st.session_state["config_usenet_provider_profiles"] = profiles
+        st.session_state["config_indexer_provider_profiles"] = profiles
 
-    current_provider = config.get("usenet_provider", config.get("secondary_missing_link_provider", "none"))
-    if current_provider not in usenet_provider_options:
+    current_provider = config.get(
+        "indexer_provider",
+        config.get("usenet_provider", config.get("secondary_missing_link_provider", "none")),
+    )
+    if current_provider not in indexer_provider_options:
         current_provider = "none"
-    if "config_selected_usenet_provider" not in st.session_state:
-        st.session_state["config_selected_usenet_provider"] = current_provider
-    if "config_prev_usenet_provider" not in st.session_state:
-        st.session_state["config_prev_usenet_provider"] = st.session_state["config_selected_usenet_provider"]
-    if "config_usenet_web_url_template" not in st.session_state:
-        initial_profile = st.session_state["config_usenet_provider_profiles"].get(
-            st.session_state["config_selected_usenet_provider"], {}
+    if "config_selected_indexer_provider" not in st.session_state:
+        st.session_state["config_selected_indexer_provider"] = current_provider
+    if "config_prev_indexer_provider" not in st.session_state:
+        st.session_state["config_prev_indexer_provider"] = st.session_state["config_selected_indexer_provider"]
+    if "config_indexer_web_url_template" not in st.session_state:
+        initial_profile = st.session_state["config_indexer_provider_profiles"].get(
+            st.session_state["config_selected_indexer_provider"], {}
         )
-        st.session_state["config_usenet_web_url_template"] = (
-            initial_profile.get("usenet_web_url_template")
-            or usenet_provider_defaults.get(st.session_state["config_selected_usenet_provider"], "")
+        st.session_state["config_indexer_web_url_template"] = (
+            initial_profile.get("indexer_web_url_template")
+            or indexer_provider_defaults.get(st.session_state["config_selected_indexer_provider"], "")
         )
-    if "config_usenet_api_key" not in st.session_state:
-        initial_profile = st.session_state["config_usenet_provider_profiles"].get(
-            st.session_state["config_selected_usenet_provider"], {}
+    if "config_indexer_api_key" not in st.session_state:
+        initial_profile = st.session_state["config_indexer_provider_profiles"].get(
+            st.session_state["config_selected_indexer_provider"], {}
         )
-        st.session_state["config_usenet_api_key"] = initial_profile.get("usenet_api_key", "")
+        st.session_state["config_indexer_api_key"] = initial_profile.get("indexer_api_key", "")
 
     plex_base_url = st.text_input("Plex Base URL", value=config.get("plex_base_url", ""))
     plex_token = st.text_input("Plex Token", value=config.get("plex_token", ""), type="password")
@@ -496,54 +504,54 @@ def render_config_editor(config):
         value=config.get("dmm_base_url", "https://debridmediamanager.com"),
         disabled=not include_dmm_link,
     )
-    usenet_provider = st.selectbox(
+    indexer_provider = st.selectbox(
         "Indexer Link Provider",
-        options=usenet_provider_options,
-        index=usenet_provider_options.index(st.session_state["config_selected_usenet_provider"]),
-        format_func=lambda v: usenet_provider_labels.get(v, v),
+        options=indexer_provider_options,
+        index=indexer_provider_options.index(st.session_state["config_selected_indexer_provider"]),
+        format_func=lambda v: indexer_provider_labels.get(v, v),
     )
 
-    if usenet_provider != st.session_state["config_prev_usenet_provider"]:
-        previous_provider = st.session_state["config_prev_usenet_provider"]
+    if indexer_provider != st.session_state["config_prev_indexer_provider"]:
+        previous_provider = st.session_state["config_prev_indexer_provider"]
         if previous_provider != "none":
-            st.session_state["config_usenet_provider_profiles"][previous_provider] = {
-                "usenet_web_url_template": st.session_state.get("config_usenet_web_url_template", ""),
-                "usenet_api_key": st.session_state.get("config_usenet_api_key", ""),
+            st.session_state["config_indexer_provider_profiles"][previous_provider] = {
+                "indexer_web_url_template": st.session_state.get("config_indexer_web_url_template", ""),
+                "indexer_api_key": st.session_state.get("config_indexer_api_key", ""),
             }
-        selected_profile = st.session_state["config_usenet_provider_profiles"].get(usenet_provider, {})
-        st.session_state["config_usenet_web_url_template"] = (
-            selected_profile.get("usenet_web_url_template")
-            or usenet_provider_defaults.get(usenet_provider, "")
+        selected_profile = st.session_state["config_indexer_provider_profiles"].get(indexer_provider, {})
+        st.session_state["config_indexer_web_url_template"] = (
+            selected_profile.get("indexer_web_url_template")
+            or indexer_provider_defaults.get(indexer_provider, "")
         )
-        st.session_state["config_usenet_api_key"] = selected_profile.get("usenet_api_key", "")
-        st.session_state["config_prev_usenet_provider"] = usenet_provider
-        st.session_state["config_selected_usenet_provider"] = usenet_provider
+        st.session_state["config_indexer_api_key"] = selected_profile.get("indexer_api_key", "")
+        st.session_state["config_prev_indexer_provider"] = indexer_provider
+        st.session_state["config_selected_indexer_provider"] = indexer_provider
         trigger_rerun()
 
-    usenet_web_url_template = st.text_input(
+    indexer_web_url_template = st.text_input(
         "Provider Web URL Template",
-        key="config_usenet_web_url_template",
+        key="config_indexer_web_url_template",
         help=(
             "Example: http://127.0.0.1:5076/search?query={query_url}. "
             "Supported vars: {query}, {query_url}, {title}, {title_url}, {code}, {code_url}, "
             "{season}, {episode}, {imdbid}, {apikey}."
         ),
-        disabled=(usenet_provider == "none"),
+        disabled=(indexer_provider == "none"),
     )
-    usenet_api_key = st.text_input(
+    indexer_api_key = st.text_input(
         "Provider API Key (Optional)",
-        key="config_usenet_api_key",
+        key="config_indexer_api_key",
         type="password",
         help="Used when your URL template includes {apikey}.",
-        disabled=(usenet_provider == "none"),
+        disabled=(indexer_provider == "none"),
     )
     submitted = st.button("Save Configuration", key="save_config_btn")
 
     if submitted:
-        if usenet_provider != "none":
-            st.session_state["config_usenet_provider_profiles"][usenet_provider] = {
-                "usenet_web_url_template": usenet_web_url_template.strip(),
-                "usenet_api_key": usenet_api_key.strip(),
+        if indexer_provider != "none":
+            st.session_state["config_indexer_provider_profiles"][indexer_provider] = {
+                "indexer_web_url_template": indexer_web_url_template.strip(),
+                "indexer_api_key": indexer_api_key.strip(),
             }
         new_config = {
             "plex_base_url": plex_base_url.strip(),
@@ -553,10 +561,10 @@ def render_config_editor(config):
             "scan_scope": scan_scope,
             "include_dmm_link": bool(include_dmm_link),
             "dmm_base_url": dmm_base_url.strip(),
-            "usenet_provider": usenet_provider,
-            "usenet_api_key": usenet_api_key.strip(),
-            "usenet_web_url_template": usenet_web_url_template.strip(),
-            "usenet_provider_profiles": st.session_state["config_usenet_provider_profiles"],
+            "indexer_provider": indexer_provider,
+            "indexer_api_key": indexer_api_key.strip(),
+            "indexer_web_url_template": indexer_web_url_template.strip(),
+            "indexer_provider_profiles": st.session_state["config_indexer_provider_profiles"],
         }
         save_config(new_config)
         st.session_state["app_config"] = new_config
