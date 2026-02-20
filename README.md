@@ -98,13 +98,33 @@ Example `config.json`:
   "plex_token": "YOUR_PLEX_TOKEN",
   "tmdb_api_key": "YOUR_TMDB_API_KEY",
   "library_name": "TV Shows",
-  "scan_scope": "all_library"
+  "scan_scope": "all_library",
+  "include_dmm_link": true,
+  "dmm_base_url": "https://debridmediamanager.com",
+  "usenet_provider": "none",
+  "usenet_api_key": "",
+  "usenet_web_url_template": "",
+  "usenet_provider_profiles": {}
 }
 ```
 
 `scan_scope` values:
 - `all_library`: scans all TV shows in your selected Plex library
 - `watchlist_only`: scans only watchlisted TV shows (movies excluded automatically)
+
+Missing link provider values:
+- `include_dmm_link`: enable/disable DMM shortcut links
+- `usenet_provider`: `none`, `newznab`, `nzbhydra`, `torznab`, `prowlarr`, `torbox`, `jackett`, `custom`
+- `usenet_web_url_template`: provider search URL template; supports:
+  `{query}`, `{query_url}`, `{title}`, `{title_url}`, `{code}`, `{code_url}`, `{season}`, `{episode}`, `{imdbid}`, `{apikey}`
+- `usenet_api_key`: optional; used by template when `{apikey}` is present
+- `usenet_provider_profiles`: auto-managed provider-specific saved template/key values
+
+Provider defaults and notes:
+- `nzbhydra`: default template `http://127.0.0.1:5076/?query={query_url}`
+- `jackett`: default template `http://127.0.0.1:9117/UI/Dashboard#search={query_url}`
+- `prowlarr`: default template `http://127.0.0.1:9696/` (adjust to your preferred search route if needed)
+- `newznab`, `torznab`, `torbox`: no hardcoded default template, because these are usually service-specific endpoints (not one universal local URL)
 
 ## Security
 
@@ -115,6 +135,10 @@ You can also use environment variables instead of storing credentials on disk:
 - `TMDB_API_KEY`
 - `PLEX_LIBRARY_NAME`
 - `PLEX_SCAN_SCOPE`
+- `INCLUDE_DMM_LINK`
+- `USENET_PROVIDER`
+- `USENET_API_KEY`
+- `USENET_WEB_URL_TEMPLATE`
 
 ## Getting API Credentials
 
