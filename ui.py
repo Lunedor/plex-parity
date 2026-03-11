@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
 
@@ -134,7 +134,7 @@ def apply_global_style():
         """
 <style>
 .block-container {
-  max-width: 1200px;
+  max-width: 1400px;
   padding-top: 1.5rem;
 }
 h1, h2, h3 {
@@ -245,6 +245,59 @@ textarea, input[type="text"], input[type="password"] {
 }
 div[data-testid="stProgressBar"] > div {
   border-radius: 999px;
+}
+.week-calendar {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+.week-day-card {
+  flex: 1 0 160px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 12px;
+  background: rgba(127, 127, 127, 0.08);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  gap: 15px;
+  min-height: 280px;
+}
+.week-day-header {
+  background: rgba(127, 127, 127, 0.15);
+  padding: 0.3rem;
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.35);
+}
+.week-day-body {
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-grow: 1;
+}
+.week-day-poster {
+  width: 90px;
+  height: 130px;
+  object-fit: cover;
+  border-radius: 6px;
+  margin-bottom: 0.4rem;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+}
+.week-day-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.2;
+  margin-bottom: 0.2rem;
+}
+.week-day-episode {
+  font-size: 0.75rem;
+  opacity: 0.9;
+  text-align: center;
 }
 </style>
         """,
@@ -645,10 +698,10 @@ def format_eta(air_date_str):
         return f"in {delta} days", delta
     return f"in ~{delta // 7} week(s)", delta
 
-
 def render_upcoming_section(data):
     st.subheader("Upcoming Episodes")
     upcoming_items = [x for x in data if x.get("next_air")]
+    
     if not upcoming_items:
         st.info("No upcoming episode date found.")
         return
@@ -657,45 +710,70 @@ def render_upcoming_section(data):
     for item in upcoming_items:
         eta_label, delta_days = format_eta(item["next_air"]["date"])
         enriched.append((delta_days, eta_label, item))
+    
     enriched.sort(key=lambda x: x[0])
 
-    spotlight = enriched[:3]
-    if spotlight:
-        st.caption("Closest upcoming episodes")
-        cols = st.columns(len(spotlight))
-        for idx, (_delta_days, eta_label, item) in enumerate(spotlight):
-            with cols[idx]:
-                poster_html = ""
-                if item.get("poster_url"):
-                    poster_html = f"<img class='upcoming-poster' src='{item['poster_url']}' alt='poster' />"
-                st.markdown(
-                    (
-                        "<div class='upcoming-card'>"
-                        f"{poster_html}"
-                        "<div class='show-card-meta'>"
-                        f"<div class='upcoming-title'>{item['title']}</div>"
-                        f"<div class='upcoming-line'>{item['next_air']['code']}</div>"
-                        f"<div class='upcoming-line'>{item['next_air']['date']}</div>"
-                        f"<div class='upcoming-eta'>{eta_label}</div>"
-                        "</div>"
-                        "</div>"
-                    ),
-                    unsafe_allow_html=True,
-                )
-        st.markdown("<div style='margin-bottom: 0.75rem;'></div>", unsafe_allow_html=True)
-
-    st.caption("Full timeline")
+    # Group existing items by date string
+    grouped_by_day = {}
     for delta_days, eta_label, item in enriched:
-        st.markdown(
-            (
+        if 0 <= delta_days <= 7:
+            date_val = item["next_air"]["date"]
+            if date_val not in grouped_by_day:
+                grouped_by_day[date_val] = []
+            grouped_by_day[date_val].append((eta_label, item))
+
+    # Identify items for "Later" section
+    later = [x for x in enriched if x[0] > 7 or x[0] < 0]
+
+    st.caption("Weekly Schedule")
+    calendar_html = "<div class='week-calendar'>"
+    
+    # Generate the 7-day range starting from today
+    base_date = datetime.now()
+    for i in range(7):
+        current_date = base_date + timedelta(days=i)
+        date_key = current_date.strftime("%Y-%m-%d")
+        date_display = current_date.strftime("%a, %b %d")
+        
+        # Start Day Card
+        calendar_html += "<div class='week-day-card'>"
+        calendar_html += f"<div class='week-day-header'>{date_display}</div>"
+        
+        # Check if we have items for this specific date
+        if date_key in grouped_by_day:
+            for eta_label, item in grouped_by_day[date_key]:
+                poster_url = item.get("poster_url", "")
+                title = item.get("title", "Unknown")
+                code = item.get("next_air", {}).get("code", "")
+                
+                poster_html = f"<img class='week-day-poster' src='{poster_url}' alt='poster' />" if poster_url else ""
+                calendar_html += "<div class='week-day-body'>"
+                calendar_html += poster_html
+                calendar_html += f"<div class='week-day-title'>{title}</div>"
+                calendar_html += f"<div class='week-day-episode'>{code}</div>"
+                calendar_html += f"<div class='week-day-episode' style='margin-top: 0.2rem; font-weight: 600;'>{eta_label}</div>"
+                calendar_html += "</div>"
+                calendar_html += f"<hr style='margin: 0;'></hr>"
+        else:
+            # Empty state for days with no episodes
+            calendar_html += "<div class='week-day-body' style='opacity: 0.5; font-style: italic; font-size: 0.8rem; text-align: center; padding: 20px 0;'>No releases</div>"
+            
+        calendar_html += "</div>" # Close Day Card
+        
+    calendar_html += "</div>"
+    st.markdown(calendar_html, unsafe_allow_html=True)
+
+    if later:
+        st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
+        st.caption("Later")
+        for delta_days, eta_label, item in later:
+            later_html = (
                 "<div class='timeline-row'>"
                 f"<div class='timeline-left'>{item['title']} - {item['next_air']['code']} ({item['next_air']['date']})</div>"
                 f"<div class='timeline-right'>{eta_label}</div>"
                 "</div>"
-            ),
-            unsafe_allow_html=True,
-        )
-
+            )
+            st.markdown(later_html, unsafe_allow_html=True)
 
 def render_result_item(item, config, show_poster=True):
     cache = load_cache()
