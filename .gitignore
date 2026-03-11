@@ -1,5 +1,6 @@
 config.json
 plex_cache.json
+scan_meta.json
 tmdb_season_cache.json
 __pycache__/
 *.py[cod]
